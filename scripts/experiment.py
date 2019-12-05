@@ -6,7 +6,7 @@ from safe_rl.utils.run_utils import setup_logger_kwargs
 from safe_rl.utils.mpi_tools import mpi_fork
 
 
-def main(robot, task, algo, seed, exp_name, cpu):
+def main(robot, task, algo, seed, exp_name, cpu, objective):
 
     # Verify experiment
     robot_list = ['point', 'car', 'doggo']
@@ -26,8 +26,10 @@ def main(robot, task, algo, seed, exp_name, cpu):
         num_steps = 1e8
         steps_per_epoch = 60000
     else:
-        num_steps = 1e7
-        steps_per_epoch = 30000
+        # num_steps = 1e7
+        # steps_per_epoch = 30000
+        num_steps = 1e6
+        steps_per_epoch = 1e4
     epochs = int(num_steps / steps_per_epoch)
     save_freq = 50
     target_kl = 0.01
@@ -37,7 +39,7 @@ def main(robot, task, algo, seed, exp_name, cpu):
     mpi_fork(cpu)
 
     # Prepare Logger
-    exp_name = exp_name or (algo + '_' + robot.lower() + task.lower())
+    exp_name = exp_name or (algo + '_' + robot.lower() + task.lower() + "" if objective is None else objective)
     logger_kwargs = setup_logger_kwargs(exp_name, seed)
 
     # Algo and Env
@@ -54,7 +56,8 @@ def main(robot, task, algo, seed, exp_name, cpu):
          target_kl=target_kl,
          cost_lim=cost_lim,
          seed=seed,
-         logger_kwargs=logger_kwargs
+         logger_kwargs=logger_kwargs,
+         controller_objective=objective
          )
 
 
@@ -68,6 +71,8 @@ if __name__ == '__main__':
     parser.add_argument('--seed', type=int, default=0)
     parser.add_argument('--exp_name', type=str, default='')
     parser.add_argument('--cpu', type=int, default=1)
+    parser.add_argument('--objective', type=str, default='')
     args = parser.parse_args()
     exp_name = args.exp_name if not(args.exp_name=='') else None
-    main(args.robot, args.task, args.algo, args.seed, exp_name, args.cpu)
+    objective = args.objective if not (args.objective == '') else None
+    main(args.robot, args.task, args.algo, args.seed, exp_name, args.cpu, objective)

@@ -46,7 +46,8 @@ def run_polopt_agent(env_fn,
                      # Logging:
                      logger=None, 
                      logger_kwargs=dict(), 
-                     save_freq=1
+                     save_freq=1,
+                     controller_objective=None
                      ):
 
 
@@ -339,9 +340,10 @@ def run_polopt_agent(env_fn,
     #=========================================================================#
 
     start_time = time.time()
-    o, r, d, c, ep_ret, ep_cost, ep_len = env.reset(), 0, False, 0, 0, 0, 0
+    o, r, d, c, ep_ret,ep_ret_true, ep_cost,ep_cost_true, ep_len = env.reset(), 0, False, 0, 0, 0, 0, 0, 0
     cur_penalty = 0
     cum_cost = 0
+    cum_cost_true = 0
 
     for epoch in range(epochs):
 
@@ -367,10 +369,23 @@ def run_polopt_agent(env_fn,
             o2, r, d, info = env.step(a)
 
             # Include penalty on cost
-            c = info.get('cost', 0)
+            if controller_objective is None:
+                c = info.get('cost', 0)
+                true_c = c
+                true_reward = r
+            elif controller_objective == 'performant':
+                c = 0
+                true_c = info.get('cost',0)
+                true_reward = r
+            else:
+                true_c = info.get('cost',0)
+                true_reward = r
+                r = -info.get('cost',0)
+                c = 0
 
             # Track cumulative cost over training
             cum_cost += c
+            cum_cost_true += true_c
 
             # save and log
             if agent.reward_penalized:
@@ -385,6 +400,8 @@ def run_polopt_agent(env_fn,
             ep_ret += r
             ep_cost += c
             ep_len += 1
+            ep_ret_true += true_reward
+            ep_cost_true += true_c
 
             terminal = d or (ep_len == max_ep_len)
             if terminal or (t==local_steps_per_epoch-1):
@@ -405,11 +422,12 @@ def run_polopt_agent(env_fn,
                 # Only save EpRet / EpLen if trajectory finished
                 if terminal:
                     logger.store(EpRet=ep_ret, EpLen=ep_len, EpCost=ep_cost)
+                    logger.store(EpRetTrue = ep_ret_true, EpCostTrue = ep_cost_true)
                 else:
                     print('Warning: trajectory cut off by epoch at %d steps.'%ep_len)
 
                 # Reset environment
-                o, r, d, c, ep_ret, ep_len, ep_cost = env.reset(), 0, False, 0, 0, 0, 0
+                o, r, d, c, ep_ret,ep_ret_true, ep_len, ep_cost,ep_cost_true = env.reset(), 0, False, 0, 0, 0, 0, 0, 0
 
         # Save model
         if (epoch % save_freq == 0) or (epoch == epochs-1):
@@ -424,8 +442,9 @@ def run_polopt_agent(env_fn,
         #  Cumulative cost calculations                                       #
         #=====================================================================#
         cumulative_cost = mpi_sum(cum_cost)
+        cumulative_cost_true = mpi_sum(cum_cost_true)
         cost_rate = cumulative_cost / ((epoch+1)*steps_per_epoch)
-
+        cost_rate_true = cumulative_cost_true / ((epoch+1)*steps_per_epoch)
         #=====================================================================#
         #  Log performance and stats                                          #
         #=====================================================================#
@@ -439,6 +458,10 @@ def run_polopt_agent(env_fn,
         logger.log_tabular('CumulativeCost', cumulative_cost)
         logger.log_tabular('CostRate', cost_rate)
 
+        logger.log_tabular('EpRetTrue', with_min_and_max=True)
+        logger.log_tabular('EpCostTrue', with_min_and_max=True)
+        logger.log_tabular('CumulativeCostTrue', cumulative_cost_true)
+        logger.log_tabular('CostRateTrue', cost_rate_true)
         # Value function values
         logger.log_tabular('VVals', with_min_and_max=True)
         logger.log_tabular('CostVVals', with_min_and_max=True)
@@ -504,6 +527,7 @@ if __name__ == '__main__':
     parser.add_argument('--learn_penalty', action='store_true')
     parser.add_argument('--penalty_param_loss', action='store_true')
     parser.add_argument('--entreg', type=float, default=0.)
+    parser.add_argument('--objective', type=str, default='')
     args = parser.parse_args()
 
     try:
@@ -528,6 +552,7 @@ if __name__ == '__main__':
         agent = TRPOAgent(**agent_kwargs)
     elif args.agent=='cpo':
         agent = CPOAgent(**agent_kwargs)
+    objective = args.objective if not (args.objective == '') else None
 
     run_polopt_agent(lambda : gym.make(args.env),
                      agent=agent,
@@ -549,5 +574,6 @@ if __name__ == '__main__':
                      cost_lim=args.cost_lim, 
                      # Logging:
                      logger_kwargs=logger_kwargs,
-                     save_freq=1
+                     save_freq=1,
+                     controller_objective=objective
                      )
