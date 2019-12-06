@@ -374,14 +374,16 @@ def run_polopt_agent(env_fn,
                 true_c = c
                 true_reward = r
             elif controller_objective == 'performant':
-                c = 0
+                # c = 0
+                c = -info.get('cost',0)
                 true_c = info.get('cost',0)
                 true_reward = r
             else:
                 true_c = info.get('cost',0)
                 true_reward = r
-                r = -info.get('cost',0)
-                c = 0
+                c = r
+                r = -info.get('cost',0) # + 50*true_reward
+                # r = -info.get('cost',0) + 0.3 * true_reward
 
             # Track cumulative cost over training
             cum_cost += c
