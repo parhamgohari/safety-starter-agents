@@ -84,8 +84,14 @@ def run_polopt_agent(env_fn,
     cur_cost_ph = tf.placeholder(tf.float32, shape=())
 
     # Outputs from actor critic
-    ac_outs = actor_critic(x_ph, a_ph, **ac_kwargs)
-    pi, logp, logp_pi, pi_info, pi_info_phs, d_kl, ent, v, vc = ac_outs
+    ac_outs = actor_critic(x_ph, a_ph, objective=controller_objective, **ac_kwargs)
+    b_pi = None
+    b_v = None
+    b_vc = None
+    if controller_objective is None:
+        pi, logp, logp_pi, pi_info, pi_info_phs, d_kl, ent, v, vc = ac_outs
+    else:
+        pi, b_pi, logp, logp_pi, pi_info, pi_info_phs, d_kl, ent, v, b_v, vc, b_vc = ac_outs
 
     # Organize placeholders for zipping with data from buffer on updates
     buf_phs = [x_ph, a_ph, adv_ph, cadv_ph, ret_ph, cret_ph, logp_old_ph]
@@ -258,7 +264,10 @@ def run_polopt_agent(env_fn,
     sess.run(sync_all_params())
 
     # Setup model saving
-    logger.setup_tf_saver(sess, inputs={'x': x_ph}, outputs={'pi': pi, 'v': v, 'vc': vc})
+    if controller_objective is None:
+        logger.setup_tf_saver(sess, inputs={'x': x_ph}, outputs={'pi': pi, 'v': v, 'vc': vc})
+    else:
+        logger.setup_tf_saver(sess, inputs={'x': x_ph}, outputs={'pi': pi, 'v': v, 'vc': vc, 'b_pi': b_pi, 'b_v' : b_v, 'b_vc' : b_vc})
 
 
     #=========================================================================#

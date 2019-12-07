@@ -24,10 +24,13 @@ def placeholder_from_space(space):
 def placeholders_from_spaces(*args):
     return [placeholder_from_space(space) for space in args]
 
-def mlp(x, hidden_sizes=(32,), activation=tf.tanh, output_activation=None):
+def mlp(x, hidden_sizes=(32,), activation=tf.tanh, output_activation=None, objective=None):
     for h in hidden_sizes[:-1]:
         x = tf.layers.dense(x, units=h, activation=activation)
-    return tf.layers.dense(x, units=hidden_sizes[-1], activation=output_activation)
+    if objective is None:
+        return tf.layers.dense(x, units=hidden_sizes[-1], activation=output_activation)
+    else:
+        return x, tf.layers.dense(x, units=hidden_sizes[-1], activation=output_activation)
 
 def get_vars(scope=''):
     return [x for x in tf.trainable_variables() if scope in x.name]
@@ -76,9 +79,14 @@ def categorical_entropy(logp):
 Policies
 """
 
-def mlp_categorical_policy(x, a, hidden_sizes, activation, output_activation, action_space):
+def mlp_categorical_policy(x, a, hidden_sizes, activation, output_activation, action_space, objective=None):
     act_dim = action_space.n
-    logits = mlp(x, list(hidden_sizes)+[act_dim], activation, None)
+    b_pi = None
+    logits = None
+    if objective is None:
+        logits = mlp(x, list(hidden_sizes)+[act_dim], activation, None, objective)
+    else:
+        b_pi , logits = mlp(x, list(hidden_sizes)+[act_dim], activation, None, objective)
     logp_all = tf.nn.log_softmax(logits)
     pi = tf.squeeze(tf.multinomial(logits,1), axis=1)
     logp = tf.reduce_sum(tf.one_hot(a, depth=act_dim) * logp_all, axis=1)
@@ -90,13 +98,20 @@ def mlp_categorical_policy(x, a, hidden_sizes, activation, output_activation, ac
 
     pi_info = {'logp_all': logp_all}
     pi_info_phs = {'logp_all': old_logp_all}
+    if objective is None:
+        return pi, logp, logp_pi, pi_info, pi_info_phs, d_kl, ent
+    else:
+        return b_pi, pi, logp, logp_pi, pi_info, pi_info_phs, d_kl, ent
 
-    return pi, logp, logp_pi, pi_info, pi_info_phs, d_kl, ent
 
-
-def mlp_gaussian_policy(x, a, hidden_sizes, activation, output_activation, action_space):
+def mlp_gaussian_policy(x, a, hidden_sizes, activation, output_activation, action_space, objective=None):
     act_dim = a.shape.as_list()[-1]
-    mu = mlp(x, list(hidden_sizes)+[act_dim], activation, output_activation)
+    b_pi = None
+    mu = None
+    if objective is None:
+        mu = mlp(x, list(hidden_sizes)+[act_dim], activation, output_activation, objective)
+    else:
+        b_pi, mu = mlp(x, list(hidden_sizes)+[act_dim], activation, output_activation, objective)
     log_std = tf.get_variable(name='log_std', initializer=-0.5*np.ones(act_dim, dtype=np.float32))
     std = tf.exp(log_std)
     pi = mu + tf.random_normal(tf.shape(mu)) * std
@@ -109,19 +124,26 @@ def mlp_gaussian_policy(x, a, hidden_sizes, activation, output_activation, actio
 
     pi_info = {'mu': mu, 'log_std': log_std}
     pi_info_phs = {'mu': old_mu_ph, 'log_std': old_log_std_ph}
-
-    return pi, logp, logp_pi, pi_info, pi_info_phs, d_kl, ent
+    if objective is None:
+        return pi, logp, logp_pi, pi_info, pi_info_phs, d_kl, ent
+    else:
+        return b_pi, pi, logp, logp_pi, pi_info, pi_info_phs, d_kl, ent
 
 
 LOG_STD_MAX = 2
 LOG_STD_MIN = -20
 
-def mlp_squashed_gaussian_policy(x, a, hidden_sizes, activation, output_activation, action_space):
+def mlp_squashed_gaussian_policy(x, a, hidden_sizes, activation, output_activation, action_space, objective=None):
     """
     Experimental code for squashed gaussian policies, not yet tested
     """
     act_dim = a.shape.as_list()[-1]
-    net = mlp(x, list(hidden_sizes), activation, activation)
+    net = None,
+    b_pi = None
+    if objective is None:
+        net = mlp(x, list(hidden_sizes), activation, activation, objective)
+    else:
+        b_pi , net = mlp(x, list(hidden_sizes), activation, activation, objective)
     mu = tf.layers.dense(net, act_dim, activation=output_activation)
     log_std = tf.layers.dense(net, act_dim, activation=None)
     log_std = tf.clip_by_value(log_std, LOG_STD_MIN, LOG_STD_MAX)
@@ -152,8 +174,10 @@ def mlp_squashed_gaussian_policy(x, a, hidden_sizes, activation, output_activati
 
     pi_info = {'mu': mu, 'log_std': log_std, 'raw_action': u}
     pi_info_phs = {'mu': old_mu_ph, 'log_std': old_log_std_ph, 'raw_action': u_ph}
-
-    return pi, logp, logp_pi, pi_info, pi_info_phs, d_kl, ent
+    if objective is None:
+        return pi, logp, logp_pi, pi_info, pi_info_phs, d_kl, ent
+    else:
+        return b_pi, pi, logp, logp_pi, pi_info, pi_info_phs, d_kl, ent
 
 
 
@@ -161,7 +185,7 @@ def mlp_squashed_gaussian_policy(x, a, hidden_sizes, activation, output_activati
 Actor-Critics
 """
 def mlp_actor_critic(x, a, hidden_sizes=(64,64), activation=tf.tanh,
-                     output_activation=None, policy=None, action_space=None):
+                     output_activation=None, policy=None, action_space=None, objective=None):
 
     # default policy builder depends on action space
     if policy is None and isinstance(action_space, Box):
@@ -170,13 +194,31 @@ def mlp_actor_critic(x, a, hidden_sizes=(64,64), activation=tf.tanh,
         policy = mlp_categorical_policy
 
     with tf.variable_scope('pi'):
-        policy_outs = policy(x, a, hidden_sizes, activation, output_activation, action_space)
-        pi, logp, logp_pi, pi_info, pi_info_phs, d_kl, ent = policy_outs
+        b_pi = None
+        policy_outs = policy(x, a, hidden_sizes, activation, output_activation, action_space, objective)
+        if objective is None:
+            pi, logp, logp_pi, pi_info, pi_info_phs, d_kl, ent = policy_outs
+        else:
+            b_pi, pi, logp, logp_pi, pi_info, pi_info_phs, d_kl, ent = policy_outs
 
     with tf.variable_scope('vf'):
-        v = tf.squeeze(mlp(x, list(hidden_sizes)+[1], activation, None), axis=1)
+        b_vf = None
+        v_temp = None
+        if objective is None:
+            v_temp = mlp(x, list(hidden_sizes)+[1], activation, None, objective)
+        else:
+            b_vf, v_temp = mlp(x, list(hidden_sizes)+[1], activation, None, objective)
+        v = tf.squeeze(v_temp, axis=1)
 
     with tf.variable_scope('vc'):
-        vc = tf.squeeze(mlp(x, list(hidden_sizes)+[1], activation, None), axis=1)
-
-    return pi, logp, logp_pi, pi_info, pi_info_phs, d_kl, ent, v, vc
+        b_vc = None
+        vc_temp = None
+        if objective is None:
+            vc_temp = mlp(x, list(hidden_sizes)+[1], activation, None, objective)
+        else:
+            b_vc, vc_temp = mlp(x, list(hidden_sizes)+[1], activation, None, objective)
+        vc = tf.squeeze(vc_temp, axis=1)
+    if objective is None:
+        return pi, logp, logp_pi, pi_info, pi_info_phs, d_kl, ent, v, vc
+    else:
+        return pi, b_pi, logp, logp_pi, pi_info, pi_info_phs, d_kl, ent, v, b_vf, vc, b_vc
