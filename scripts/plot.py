@@ -5,6 +5,7 @@ import json
 import os
 import os.path as osp
 import numpy as np
+import tikzplotlib
 
 DIV_LINE_WIDTH = 50
 
@@ -150,9 +151,10 @@ def plot_data(data, xaxis='Epoch', value="AverageEpRet",
             line.set_linewidth(4.0)
         plt.tight_layout(pad=0.5)
         plt.savefig(osp.join(savedir, title+'_legend.pdf'), format='pdf')
+    plt.tight_layout()
+    tikzplotlib.save(value + "_policy_sp.tex")
 
-
-def get_datasets(logdir, condition=None):
+def get_datasets(logdir, condition=None, safe_perf=False):
     """
     Recursively look through logdir for output files produced by
     spinup.logx.Logger. 
@@ -174,17 +176,20 @@ def get_datasets(logdir, condition=None):
                 print('No file named config.json')
             condition1 = condition or exp_name or 'exp'
             condition2 = condition1 + '-' + str(exp_idx)
-            exp_idx += 1
-            if condition1 not in units:
-                units[condition1] = 0
-            unit = units[condition1]
-            units[condition1] += 1
-
+            if not safe_perf:
+                exp_idx += 1
+                if condition1 not in units:
+                    units[condition1] = 0
+                unit = units[condition1]
+                units[condition1] += 1
+            else:
+                unit = 0
             try:
                 exp_data = pd.read_table(os.path.join(root,'progress.txt'))
             except:
                 print('Could not read from %s'%os.path.join(root,'progress.txt'))
                 continue
+            # print (exp_data.columns)
             performance = 'AverageTestEpRet' if 'AverageTestEpRet' in exp_data else 'AverageEpRet'
             exp_data.insert(len(exp_data.columns),'Unit',unit)
             exp_data.insert(len(exp_data.columns),'Condition1',condition1)
@@ -193,6 +198,69 @@ def get_datasets(logdir, condition=None):
             datasets.append(exp_data)
     return datasets
 
+def plot_blending_data(blendingEvolRet, blendingEvolCost, envInteract, perfPolicyRet, perfPolicyCost, safePolicyRet, safePolicyCost , ratio_safe, ratio_perf):
+    plt.figure()
+    plt.plot(envInteract, perfPolicyRet, label='perf policy')
+    plt.plot(envInteract, safePolicyRet, label='safe policy')
+    plt.xlabel('Total Environment Interacts')
+    plt.ylabel('Return')
+    plt.title('Return evolution for the safe and performant policies')
+    plt.legend(loc='best')
+    plt.grid(True)
+    plt.tight_layout()
+    tikzplotlib.save("return_policy_sp.tex")
+
+    # plt.tight_layout()
+
+    plt.figure()
+    plt.plot(envInteract, perfPolicyCost, label='perf policy')
+    plt.plot(envInteract, safePolicyCost, label='safe policy')
+    plt.xlabel('Total Environment Interacts')
+    plt.ylabel('Cost')
+    plt.title('Cost evolution for the safe and performant policies')
+    plt.legend(loc='best')
+    plt.grid(True)
+    plt.tight_layout()
+    tikzplotlib.save("cost_policy_sp.tex")
+
+    envInteractAfter = [envInteract[-1] + x*30000 for x in range(len(blendingEvolRet))]
+    lastInd = len(perfPolicyRet) - len(blendingEvolRet)
+    plt.figure()
+    plt.plot(envInteractAfter, perfPolicyRet[lastInd:], label='perf policy')
+    plt.plot(envInteractAfter, safePolicyRet[lastInd:], label='safe policy')
+    plt.plot(envInteractAfter, blendingEvolRet, label='blending policy')
+    plt.xlabel('Total Environment Interacts')
+    plt.ylabel('Return')
+    plt.title('Return for the blending algorithm')
+    plt.legend(loc='best')
+    plt.grid(True)
+    plt.tight_layout()
+    tikzplotlib.save("return_blending_sp.tex")
+
+    plt.figure()
+    plt.plot(envInteractAfter, perfPolicyCost[lastInd:], label='perf policy')
+    plt.plot(envInteractAfter, safePolicyCost[lastInd:], label='safe policy')
+    plt.plot(envInteractAfter, blendingEvolCost, label='blending policy')
+    plt.xlabel('Total Environment Interacts')
+    plt.ylabel('Cost')
+    plt.title('Cost for the blending algorithm')
+    plt.legend(loc='best')
+    plt.grid(True)
+    plt.tight_layout()
+    tikzplotlib.save("cost_blending_sp.tex")
+
+    # Env interact after learning
+    envInteractAfter = [envInteract[-1] + x for x in range(ratio_safe.shape[0])]
+    plt.figure()
+    plt.plot(envInteractAfter, ratio_safe/ratio_safe.shape[0], label='safe')
+    plt.plot(envInteractAfter, ratio_perf/ratio_safe.shape[0], label='performant')
+    plt.xlabel('Total Environment Interacts')
+    plt.ylabel('ratio of policy taken')
+    plt.title('Evolution of the percentage of taken policy')
+    plt.legend(loc='best')
+    plt.grid(True)
+    plt.tight_layout()
+    tikzplotlib.save("action_picked.tex")
 
 def get_all_datasets(all_logdirs, legend=None, select=None, exclude=None):
     """
@@ -244,12 +312,132 @@ def get_all_datasets(all_logdirs, legend=None, select=None, exclude=None):
             data += get_datasets(log)
     return data
 
+def get_blend_datas(safepath, perfpath, blendpath, regretpath):
+    global exp_idx
+    global units
+    if safepath == '' or perfpath == '' or blendpath == '' or regretpath == '':
+        return None, None, None, None, None, None , None, None
+    all_logdirs = [safepath, perfpath, blendpath]
+    logdirs = []
+    for logdir in all_logdirs:
+        if osp.isdir(logdir) and logdir[-1]=='/':
+            logdirs += [logdir]
+        else:
+            basedir = osp.dirname(logdir)
+            fulldir = lambda x : osp.join(basedir, x)
+            prefix = logdir.split('/')[-1]
+            listdir= os.listdir(basedir)
+            logdirs += sorted([fulldir(x) for x in listdir if prefix in x])
+
+    data_s, data_p, data_b = get_datasets(logdirs[0],safe_perf=True)[0], get_datasets(logdirs[1],safe_perf=True)[0],get_datasets(logdirs[2],safe_perf=True)[0]
+    data = pd.DataFrame(columns= ['Epoch','AverageEpRet', 'AverageEpCost', 'TotalEnvInteracts'])
+    blendingEvolRet = []
+    blendingEvolCost = []
+    # performant policy
+    for i in range(int(data_p.shape[0]/2)): # Hard values
+        avgRetVal = data_p.loc[i,'AverageEpRet']
+        avgCost = -data_p.loc[i,'AverageEpCost']
+        data = data.append({'Epoch' : i ,'AverageEpRet' : avgRetVal, 'AverageEpCost' : avgCost, 'TotalEnvInteracts' : int((i+1) * 30000)}, ignore_index=True)
+    for i in range(int(data_p.shape[0]/2), data_p.shape[0]):
+        avgRetVal = data_s.loc[i-int(data_p.shape[0]/2),'AverageEpCost']
+        avgCost = -data_s.loc[i-int(data_p.shape[0]/2),'AverageEpRet']
+        data = data.append({'Epoch' : i ,'AverageEpRet' : avgRetVal, 'AverageEpCost' : avgCost, 'TotalEnvInteracts' : int((i+1) * 30000)}, ignore_index=True)
+    for i in range(data_p.shape[0], data_p.shape[0]+data_b.shape[0]):
+        avgRetVal = data_b.loc[i-data_p.shape[0],'AverageEpRet']
+        avgCost = data_b.loc[i-data_p.shape[0],'AverageEpCost']
+        blendingEvolRet.append(avgRetVal)
+        blendingEvolCost.append(avgCost)
+        data = data.append({'Epoch' : i ,'AverageEpRet' : avgRetVal, 'AverageEpCost' : avgCost, 'TotalEnvInteracts' : int((i+1) * 30000)}, ignore_index=True)
+    condition1 = 'Blending'
+    condition2 = condition1 + '-' + str(exp_idx)
+    exp_idx += 1
+    if condition1 not in units:
+        units[condition1] = 0
+    unit = units[condition1]
+    units[condition1] += 1
+    performance = 'AverageTestEpRet' if 'AverageTestEpRet' in data else 'AverageEpRet'
+    data.insert(len(data.columns),'Unit',unit)
+    data.insert(len(data.columns),'Condition1',condition1)
+    data.insert(len(data.columns),'Condition2',condition2)
+    data.insert(len(data.columns),'Performance',data[performance])
+    envInteract = []
+    perfPolicyRet = []
+    perfPolicyCost = []
+    safePolicyRet = []
+    safePolicyCost = []
+    for i in range(int(data_p.shape[0])):
+        envInteract.append(data_p.loc[i,'TotalEnvInteracts'])
+        perfPolicyRet.append(data_p.loc[i,'AverageEpRet'])
+        perfPolicyCost.append(-data_p.loc[i,'AverageEpCost'])
+        safePolicyRet.append(data_s.loc[i,'AverageEpCost'])
+        safePolicyCost.append(-data_s.loc[i,'AverageEpRet'])
+    ucb_evol = np.load(regretpath)
+    ratio_safe = np.zeros(ucb_evol.shape[0])
+    ratio_perf = np.zeros(ucb_evol.shape[0])
+    for t in range(ucb_evol.shape[0]):
+        if t == 0:
+            if ucb_evol[t,4] == 0:
+                ratio_safe[t] = 1
+            else:
+                ratio_perf[t] = 0
+            continue
+        if ucb_evol[t,4] == 0:
+            ratio_safe[t] = ratio_safe[t-1] + 1
+            ratio_perf[t] = ratio_perf[t-1]
+        else:
+            ratio_safe[t] = ratio_safe[t-1]
+            ratio_perf[t] = ratio_perf[t-1] + 1
+    # print (data)
+    # print (data_s)
+    # print (data_p)
+    # print (data_b)
+    # ucb_evol = np.load(regretpath)
+    # len_ucb_evol = 0
+    # for t in range(ucb_evol.shape[0]):
+    #     if ucb_evol[t,0] == 0 and ucb_evol[t,1] == 0 and ucb_evol[t,2] == 0 and ucb_evol[t,3] == 0:
+    #         len_ucb_evol = t
+    #         break
+    # ucb_evol = ucb_evol[:t,:]
+    # data_ucb = []
+    # last_data_ucb = 0
+    # for t in range(ucb_evol.shape[0]):
+    #     curr_act = ucb_evol[t,4]
+    #     new_eps = 0
+    #     ucb_r_safe = ucb_evol[t,0]
+    #     ucb_c_safe = ucb_evol[t,1]
+    #     ucb_r_perf = ucb_evol[t,2]
+    #     ucb_c_perf = ucb_evol[t,3]
+    #     if curr_act == 0: # Safe case
+    #         if (ucb_r_safe == ucb_r_perf and ucb_c_safe == ucb_c_perf) or (ucb_c_perf <= ucb_c_safe and ucb_r_perf < ucb_r_safe) or (ucb_c_perf < ucb_c_safe and ucb_r_perf <= ucb_r_safe):
+    #             new_eps = 0
+    #         else:
+    #             temp1 = ucb_r_perf - ucb_r_safe
+    #             temp2 = ucb_c_perf - ucb_c_safe
+    #             new_eps = min(temp1,temp2) + 0.01
+    #     else:
+    #         if (ucb_r_safe == ucb_r_perf and ucb_c_safe == ucb_c_perf) or (ucb_c_perf >= ucb_c_safe and ucb_r_perf > ucb_r_safe) or (ucb_c_perf > ucb_c_safe and ucb_r_perf >= ucb_r_safe):
+    #             new_eps = 0
+    #         else:
+    #             temp1 = -(ucb_r_perf - ucb_r_safe)
+    #             temp2 = -(ucb_c_perf - ucb_c_safe)
+    #             new_eps = min(temp1,temp2) + 0.01
+    #     last_data_ucb += new_eps
+    #     data_ucb.append(last_data_ucb)
+    return data, blendingEvolRet, blendingEvolCost, envInteract, perfPolicyRet, perfPolicyCost, safePolicyRet, safePolicyCost , ratio_safe, ratio_perf
+
 
 def make_plots(all_logdirs, legend=None, xaxis=None, values=None, count=False,  
                font_scale=1.5, smooth=1, select=None, exclude=None, estimator='mean',
                paper=False, hidelegend=False, title=None, savedir=None, show=True,
-               clear_xticks=False):
+               clear_xticks=False, safepath= None, perfpath=None, blendpath=None,
+               regretpath= None):
     data = get_all_datasets(all_logdirs, legend, select, exclude)
+    data_blend, blendingEvolRet, blendingEvolCost, envInteract, perfPolicyRet, perfPolicyCost, safePolicyRet, safePolicyCost , ratio_safe, ratio_perf = get_blend_datas(safepath, perfpath, blendpath, regretpath)
+    if data_blend is not None:
+        data += [data_blend]
+        plot_blending_data(blendingEvolRet, blendingEvolCost, envInteract, perfPolicyRet, perfPolicyCost, safePolicyRet, safePolicyCost , ratio_safe, ratio_perf)
+    # print (regret_data)
+    # return
     values = values if isinstance(values, list) else [values]
     condition = 'Condition2' if count else 'Condition1'
     estimator = getattr(np, estimator)      # choose what to show on main curve: mean? max? min?
@@ -263,6 +451,8 @@ def make_plots(all_logdirs, legend=None, xaxis=None, values=None, count=False,
     if show:
         plt.show()
 
+
+# python plot.py ../data/2019-12-09_cpo_PointGoal2 ../data/2019-12-08_ppo_lagrangian_PointGoal2/2019-12-08_17-55-22-ppo_lagrangian_PointGoal2_s0  --safepath=../data/2019-12-06_ppo_PointGoal2/2019-12-06_21-07-36-ppo_PointGoal2_s0 --perfpath=../data/2019-12-06_ppo_PointGoal2/2019-12-06_21-06-31-ppo_PointGoal2_s0 --blendpath=../data/2019-12-09_blending_policy/2019-12-09_00-39-03-blending_policy_s0/ --regretpath=../../pareto_regret.npy  --legend CPO PPO-Lagrangian --value AverageEpRet AverageEpCost
 
 def main():
     import argparse
@@ -282,6 +472,10 @@ def main():
     parser.add_argument('--savedir', type=str, default='')
     parser.add_argument('--dont_show', action='store_true')
     parser.add_argument('--clearx', action='store_true')
+    parser.add_argument('--safepath', default='')
+    parser.add_argument('--perfpath', default='')
+    parser.add_argument('--blendpath', default='')
+    parser.add_argument('--regretpath', default='')
     args = parser.parse_args()
     """
 
@@ -336,7 +530,8 @@ def main():
                smooth=args.smooth, select=args.select, exclude=args.exclude,
                estimator=args.est, paper=args.paper, hidelegend=args.hidelegend,
                title=args.title, savedir=args.savedir, show=not(args.dont_show),
-               clear_xticks=args.clearx)
+               clear_xticks=args.clearx, safepath=args.safepath, perfpath=args.perfpath, 
+               blendpath=args.blendpath, regretpath=args.regretpath)
 
 if __name__ == "__main__":
     main()
