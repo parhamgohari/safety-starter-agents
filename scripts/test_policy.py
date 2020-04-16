@@ -23,7 +23,6 @@ def run_policy(env, get_action, max_ep_len=None, num_episodes=100, render=True):
         a = get_action(o)
         a = np.clip(a, env.action_space.low, env.action_space.high)
         o, r, d, info = env.step(a)
-        # print (r , info.get('cost', 0))
         ep_ret += r
         ep_cost += info.get('cost', 0)
         ep_len += 1
