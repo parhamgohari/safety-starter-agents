@@ -9,29 +9,30 @@ from safe_rl.pg.network import count_vars, \
                                get_vars, \
                                mlp_actor_critic,\
                                placeholders, \
-                               placeholders_from_spaces
+                               placeholders_from_spaces,\
+                               mlp_actor_critic_im
 from safe_rl.pg.utils import values_as_sorted_list
 from safe_rl.utils.logx import EpochLogger
 from safe_rl.utils.mpi_tf import MpiAdamOptimizer, sync_all_params
 from safe_rl.utils.mpi_tools import mpi_fork, proc_id, num_procs, mpi_sum
 
-# Multi-purpose agent runner for policy optimization algos 
+# Multi-purpose agent runner for policy optimization algos
 # (PPO, TRPO, their primal-dual equivalents, CPO)
-def run_polopt_agent(env_fn, 
+def run_polopt_agent(env_fn,
                      agent=PPOAgent(),
-                     actor_critic=mlp_actor_critic, 
-                     ac_kwargs=dict(), 
+                     actor_critic=mlp_actor_critic,
+                     ac_kwargs=dict(),
                      seed=0,
                      render=False,
                      # Experience collection:
-                     steps_per_epoch=4000, 
-                     epochs=50, 
+                     steps_per_epoch=4000,
+                     epochs=50,
                      max_ep_len=1000,
                      # Discount factors:
-                     gamma=0.99, 
+                     gamma=0.99,
                      lam=0.97,
-                     cost_gamma=0.99, 
-                     cost_lam=0.97, 
+                     cost_gamma=0.99,
+                     cost_lam=0.97,
                      # Policy learning:
                      ent_reg=0.,
                      # Cost constraints / penalties:
@@ -39,13 +40,13 @@ def run_polopt_agent(env_fn,
                      penalty_init=1.,
                      penalty_lr=5e-2,
                      # KL divergence:
-                     target_kl=0.01, 
+                     target_kl=0.01,
                      # Value learning:
                      vf_lr=1e-3,
-                     vf_iters=80, 
+                     vf_iters=80,
                      # Logging:
-                     logger=None, 
-                     logger_kwargs=dict(), 
+                     logger=None,
+                     logger_kwargs=dict(),
                      save_freq=1
                      ):
 
@@ -75,8 +76,14 @@ def run_polopt_agent(env_fn,
     # Inputs to computation graph from environment spaces
     x_ph, a_ph = placeholders_from_spaces(env.observation_space, env.action_space)
 
+    #Inputs of the feature estimation network
+    state_action_ph = tf.concat([x_ph,a_ph], axis=1)
+
     # Inputs to computation graph for batch data
     adv_ph, cadv_ph, ret_ph, cret_ph, logp_old_ph = placeholders(*(None for _ in range(5)))
+
+    # Inputs to computation graph for batch data for learning feature estimation network
+    adv_Q_ph, cadv_Q_ph, ret_Q_ph, cret_Q_ph, logp_old_Q_ph = placeholders(*(None for _ in range(5)))
 
     # Inputs to computation graph for special purposes
     surr_cost_rescale_ph = tf.placeholder(tf.float32, shape=())
@@ -86,15 +93,25 @@ def run_polopt_agent(env_fn,
     ac_outs = actor_critic(x_ph, a_ph, **ac_kwargs)
     pi, logp, logp_pi, pi_info, pi_info_phs, d_kl, ent, v, vc = ac_outs
 
+    # Outputs of the NN for the feature estimation
+    rewQ, costQ = mlp_actor_critic_im(state_action_ph, **ac_kwargs)
+
     # Organize placeholders for zipping with data from buffer on updates
     buf_phs = [x_ph, a_ph, adv_ph, cadv_ph, ret_ph, cret_ph, logp_old_ph]
     buf_phs += values_as_sorted_list(pi_info_phs)
 
+    # Organize placeholders for zipping with data from buffer on updates -> Feature estimation
+    buf_Q_phs = [x_ph, a_ph, adv_Q_ph, cadv_Q_ph, ret_Q_ph, cret_Q_ph, logp_old_Q_ph]
+    buf_Q_phs += values_as_sorted_list(pi_info_phs)
+
     # Organize symbols we have to compute at each step of acting in env
-    get_action_ops = dict(pi=pi, 
-                          v=v, 
+    get_action_ops = dict(pi=pi,
+                          v=v,
                           logp_pi=logp_pi,
                           pi_info=pi_info)
+
+    # Organize symbols we have to compute at each step of acting in env -> Feature estimation
+    get_action_ops_Q = dict(rewQ=rewQ, costQ=costQ)
 
     # If agent is reward penalized, it doesn't use a separate value function
     # for costs and we don't need to include it in get_action_ops; otherwise we do.
@@ -102,8 +119,8 @@ def run_polopt_agent(env_fn,
         get_action_ops['vc'] = vc
 
     # Count variables
-    var_counts = tuple(count_vars(scope) for scope in ['pi', 'vf', 'vc'])
-    logger.log('\nNumber of parameters: \t pi: %d, \t v: %d, \t vc: %d\n'%var_counts)
+    var_counts = tuple(count_vars(scope) for scope in ['pi', 'vf', 'vc', 'r_im', 'c_im'])
+    logger.log('\nNumber of parameters: \t pi: %d, \t v: %d, \t vc: %d, \t r_im: %d, \t c_im: %d\n'%var_counts)
 
     # Make a sample estimate for entropy to use as sanity check
     approx_ent = tf.reduce_mean(-logp)
@@ -121,12 +138,21 @@ def run_polopt_agent(env_fn,
     local_steps_per_epoch = int(steps_per_epoch / num_procs())
     pi_info_shapes = {k: v.shape.as_list()[1:] for k,v in pi_info_phs.items()}
     buf = CPOBuffer(local_steps_per_epoch,
-                    obs_shape, 
-                    act_shape, 
-                    pi_info_shapes, 
-                    gamma, 
+                    obs_shape,
+                    act_shape,
+                    pi_info_shapes,
+                    gamma,
                     lam,
                     cost_gamma,
+                    cost_lam)
+    # Buffer for Feature estimation
+    buf_Q = CPOBuffer(local_steps_per_epoch,
+                    obs_shape,
+                    act_shape,
+                    pi_info_shapes,
+                    0.01,
+                    lam,
+                    0.01,
                     cost_lam)
 
 
@@ -162,8 +188,8 @@ def run_polopt_agent(env_fn,
 
     # Surrogate advantage / clipped surrogate advantage
     if agent.clipped_adv:
-        min_adv = tf.where(adv_ph>0, 
-                           (1+agent.clip_ratio)*adv_ph, 
+        min_adv = tf.where(adv_ph>0,
+                           (1+agent.clip_ratio)*adv_ph,
                            (1-agent.clip_ratio)*adv_ph
                            )
         surr_adv = tf.reduce_mean(tf.minimum(ratio * adv_ph, min_adv))
@@ -220,9 +246,9 @@ def run_polopt_agent(env_fn,
         raise NotImplementedError
 
     # Provide training package to agent
-    training_package.update(dict(pi_loss=pi_loss, 
+    training_package.update(dict(pi_loss=pi_loss,
                                  surr_cost=surr_cost,
-                                 d_kl=d_kl, 
+                                 d_kl=d_kl,
                                  target_kl=target_kl,
                                  cost_lim=cost_lim))
     agent.prepare_update(training_package)
@@ -235,6 +261,9 @@ def run_polopt_agent(env_fn,
     v_loss = tf.reduce_mean((ret_ph - v)**2)
     vc_loss = tf.reduce_mean((cret_ph - vc)**2)
 
+    v_Q_loss = tf.reduce_mean((ret_Q_ph - rewQ)**2)
+    vc_Q_loss = tf.reduce_mean((cret_Q_ph - costQ)**2)
+
     # If agent uses penalty directly in reward function, don't train a separate
     # value function for predicting cost returns. (Only use one vf for r - p*c.)
     if agent.reward_penalized:
@@ -244,6 +273,9 @@ def run_polopt_agent(env_fn,
 
     # Optimizer for value learning
     train_vf = MpiAdamOptimizer(learning_rate=vf_lr).minimize(total_value_loss)
+
+    train_Q_v = MpiAdamOptimizer(learning_rate=vf_lr).minimize(v_Q_loss)
+    train_Q_vc = MpiAdamOptimizer(learning_rate=vf_lr).minimize(vc_Q_loss)
 
 
     #=========================================================================#
@@ -257,7 +289,8 @@ def run_polopt_agent(env_fn,
     sess.run(sync_all_params())
 
     # Setup model saving
-    logger.setup_tf_saver(sess, inputs={'x': x_ph}, outputs={'pi': pi, 'v': v, 'vc': vc})
+    logger.setup_tf_saver(sess, inputs={'x': x_ph}, outputs={'pi': pi, 'v': v, 'vc': vc,
+                            'r_im' : rewQ, 'c_im' : costQ})
 
 
     #=========================================================================#
@@ -283,6 +316,10 @@ def run_polopt_agent(env_fn,
         inputs = {k:v for k,v in zip(buf_phs, buf.get())}
         inputs[surr_cost_rescale_ph] = logger.get_stats('EpLen')[0]
         inputs[cur_cost_ph] = cur_cost
+
+        inputs_Q = {k:v for k,v in zip(buf_Q_phs, buf_Q.get())}
+        inputs_Q[surr_cost_rescale_ph] = logger.get_stats('EpLen')[0]
+        inputs_Q[cur_cost_ph] = cur_cost
 
         #=====================================================================#
         #  Make some measurements before updating                             #
@@ -316,6 +353,8 @@ def run_polopt_agent(env_fn,
         #=====================================================================#
         for _ in range(vf_iters):
             sess.run(train_vf, feed_dict=inputs)
+            sess.run(train_Q_v, feed_dict=inputs_Q)
+            sess.run(train_Q_vc, feed_dict=inputs_Q)
 
         #=====================================================================#
         #  Make some measurements after updating                              #
@@ -353,15 +392,21 @@ def run_polopt_agent(env_fn,
             # Possibly render
             if render and proc_id()==0 and t < 1000:
                 env.render()
-            
+
             # Get outputs from policy
-            get_action_outs = sess.run(get_action_ops, 
+            get_action_outs = sess.run(get_action_ops,
                                        feed_dict={x_ph: o[np.newaxis]})
             a = get_action_outs['pi']
             v_t = get_action_outs['v']
             vc_t = get_action_outs.get('vc', 0)  # Agent may not use cost value func
             logp_t = get_action_outs['logp_pi']
             pi_info_t = get_action_outs['pi_info']
+
+            get_action_outs_Q = sess.run(get_action_ops_Q,
+                                    feed_dict={x_ph: o[np.newaxis],
+                                                a_ph: np.squeeze(a)[np.newaxis]})
+            est_rew = get_action_outs_Q['rewQ']
+            est_cost = get_action_outs_Q['costQ']
 
             # Step in environment
             o2, r, d, info = env.step(a)
@@ -379,7 +424,10 @@ def run_polopt_agent(env_fn,
                 buf.store(o, a, r_total, v_t, 0, 0, logp_t, pi_info_t)
             else:
                 buf.store(o, a, r, v_t, c, vc_t, logp_t, pi_info_t)
-            logger.store(VVals=v_t, CostVVals=vc_t)
+            buf_Q.store(o, a, r, est_rew, c, est_cost, logp_t, pi_info_t)
+
+            logger.store(VVals=v_t, CostVVals=vc_t, EstRew=est_rew, EstCost=est_cost,
+                            TrueRew=r, TrueCost=c)
 
             o = o2
             ep_ret += r
@@ -400,7 +448,11 @@ def run_polopt_agent(env_fn,
                         last_cval = 0
                     else:
                         last_val, last_cval = sess.run([v, vc], feed_dict=feed_dict)
+                last_val_Q, last_cval_Q = sess.run([rewQ, costQ],
+                                feed_dict={x_ph: o[np.newaxis],
+                                                a_ph: np.squeeze(a)[np.newaxis]})
                 buf.finish_path(last_val, last_cval)
+                buf_Q.finish_path(last_val_Q, last_cval_Q)
 
                 # Only save EpRet / EpLen if trajectory finished
                 if terminal:
@@ -442,6 +494,12 @@ def run_polopt_agent(env_fn,
         # Value function values
         logger.log_tabular('VVals', with_min_and_max=True)
         logger.log_tabular('CostVVals', with_min_and_max=True)
+
+        logger.log_tabular('EstRew', with_min_and_max=True)
+        logger.log_tabular('EstCost', with_min_and_max=True)
+
+        logger.log_tabular('TrueRew', with_min_and_max=True)
+        logger.log_tabular('TrueCost', with_min_and_max=True)
 
         # Pi loss and change
         logger.log_tabular('LossPi', average_only=True)
@@ -532,11 +590,11 @@ if __name__ == '__main__':
     run_polopt_agent(lambda : gym.make(args.env),
                      agent=agent,
                      actor_critic=mlp_actor_critic,
-                     ac_kwargs=dict(hidden_sizes=[args.hid]*args.l), 
-                     seed=args.seed, 
-                     render=args.render, 
+                     ac_kwargs=dict(hidden_sizes=[args.hid]*args.l),
+                     seed=args.seed,
+                     render=args.render,
                      # Experience collection:
-                     steps_per_epoch=args.steps, 
+                     steps_per_epoch=args.steps,
                      epochs=args.epochs,
                      max_ep_len=args.len,
                      # Discount factors:
@@ -546,7 +604,7 @@ if __name__ == '__main__':
                      ent_reg=args.entreg,
                      # KL Divergence:
                      target_kl=args.kl,
-                     cost_lim=args.cost_lim, 
+                     cost_lim=args.cost_lim,
                      # Logging:
                      logger_kwargs=logger_kwargs,
                      save_freq=1
