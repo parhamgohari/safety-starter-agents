@@ -289,7 +289,7 @@ def run_polopt_agent(env_fn,
     sess.run(sync_all_params())
 
     # Setup model saving
-    logger.setup_tf_saver(sess, inputs={'x': x_ph}, outputs={'pi': pi, 'v': v, 'vc': vc,
+    logger.setup_tf_saver(sess, inputs={'x': x_ph, 'a': a_ph}, outputs={'pi': pi, 'v': v, 'vc': vc,
                             'r_im' : rewQ, 'c_im' : costQ})
 
 

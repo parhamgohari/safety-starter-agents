@@ -97,5 +97,5 @@ if __name__ == '__main__':
                                         args.deterministic)
     logger_kwargs = setup_logger_kwargs(args.exp_name, args.seed)
     run_policy(env, get_action, not(args.norender), max_ep_len=1000,
-                num_env_interact=int(4e6), steps_per_epoch=30000,
+                num_env_interact=int(1e6), steps_per_epoch=30000,
                 save_freq=50, logger=None, logger_kwargs=logger_kwargs)

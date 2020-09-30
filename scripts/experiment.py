@@ -31,7 +31,7 @@ def main(robot, task, algo, seed, exp_name, cpu, epochs, steps_per_epoch):
     # epochs = int(num_steps / steps_per_epoch)
     save_freq = 50
     target_kl = 0.01
-    cost_lim = 25
+    cost_lim = 100
 
     # Fork for parallelizing
     mpi_fork(cpu)
